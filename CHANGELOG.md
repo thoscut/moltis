@@ -19,6 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260518.01] - 2026-05-18
+### Fixed
+- [ci] Drain fake claude stdin in coverage test
+- [config] Preserve explicit defaults on startup (#1015)
+- [agents] Honor BeforeLLMCall hook modifications (#1018)
+- [providers] Parse thought reasoning tags (#1016)
+- [agents] Dispatch before agent start hooks (#1017)
+- [tools] Ignore heredoc bodies in dangerous command scan (#1019)
+- [ci] Allowlist oversized files for decomposition
+- [sandbox] Update slacrawl go module path (#1021)
+
 ## [20260517.03] - 2026-05-17
 ### Fixed
 - [ci] Stabilize external agent e2e binding
