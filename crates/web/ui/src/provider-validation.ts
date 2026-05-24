@@ -4,6 +4,7 @@ import type { RpcResponse } from "./types";
 const MODEL_SERVICE_NOT_CONFIGURED = "model service not configured";
 const MODEL_TEST_RETRY_ATTEMPTS = 40;
 const MODEL_TEST_RETRY_DELAY_MS = 250;
+const COMPLETION_ENDPOINT_SUFFIXES = ["/chat/completions", "/responses"];
 
 interface ProbeResult {
 	status?: string;
@@ -45,6 +46,24 @@ export interface TestModelResult {
 export interface ValidateConnectionResult {
 	ok: boolean;
 	message: string | null;
+}
+
+export function providerBaseUrlError(baseUrl: string | null | undefined): string | null {
+	const trimmed = baseUrl?.trim().replace(/\/+$/, "") || "";
+	if (!trimmed) return null;
+	try {
+		const parsed = new URL(trimmed);
+		if (!(parsed.protocol === "http:" || parsed.protocol === "https:") || !parsed.hostname) {
+			return "Endpoint URL must include an http:// or https:// scheme and a host.";
+		}
+	} catch {
+		return "Endpoint URL must be a valid HTTP(S) URL, such as 'https://api.example.com/v1'.";
+	}
+	const lower = trimmed.toLowerCase();
+	const suffix = COMPLETION_ENDPOINT_SUFFIXES.find((value) => lower.endsWith(value));
+	if (!suffix) return null;
+	const suggested = trimmed.slice(0, -suffix.length) || trimmed;
+	return `Endpoint URL should be the API base URL, not the completion path. Use '${suggested}' instead of '${trimmed}'.`;
 }
 
 function firstProbeFailure(payload: DetectPayload | undefined): string | null {
