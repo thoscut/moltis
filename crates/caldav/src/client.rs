@@ -131,6 +131,23 @@ impl LibDavCalDavClient {
     }
 }
 
+/// Build the server-side `calendar-query` REPORT that filters a collection
+/// by VEVENT time range.
+///
+/// Per RFC 4791 the `time-range` element must sit inside
+/// `comp-filter name="VEVENT"`, nested in `comp-filter name="VCALENDAR"` —
+/// servers (e.g. Nextcloud) silently ignore filters at the wrong level.
+/// `start`/`end` must be iCalendar UTC basic format (`YYYYMMDDTHHMMSSZ`).
+fn build_time_range_query<'a>(
+    calendar_href: &'a str,
+    start: &'a str,
+    end: &'a str,
+) -> Result<libdav::caldav::ListCalendarResources<'a>> {
+    libdav::caldav::ListCalendarResources::new(calendar_href)
+        .with_component_and_time_range("VEVENT", Some(start), Some(end))
+        .map_err(|e| Error::Validation(format!("invalid time-range filter: {e}")))
+}
+
 #[async_trait]
 impl CalDavClient for LibDavCalDavClient {
     async fn list_calendars(&self) -> Result<Vec<CalendarInfo>> {
@@ -190,12 +207,46 @@ impl CalDavClient for LibDavCalDavClient {
     async fn list_events(
         &self,
         calendar_href: &str,
-        _range: Option<TimeRange>,
+        range: Option<TimeRange>,
     ) -> Result<Vec<EventSummary>> {
-        // Fetch all calendar resources (iCal data + etags)
+        // With a range, ask the server which resources match first
+        // (calendar-query REPORT with a VCALENDAR > VEVENT time-range
+        // filter), then fetch only those via calendar-multiget. Without a
+        // range, fetch everything in the collection.
+        let matching_hrefs = match &range {
+            Some(r) => {
+                let start = crate::time_filter::to_ical_utc(&r.start)?;
+                let end = crate::time_filter::to_ical_utc(&r.end)?;
+                let listed = self
+                    .inner
+                    .request(build_time_range_query(calendar_href, &start, &end)?)
+                    .await
+                    .map_err(|e| {
+                        Error::Protocol(format!("calendar time-range query failed: {e}"))
+                    })?;
+                if listed.resources.is_empty() {
+                    return Ok(Vec::new());
+                }
+                Some(
+                    listed
+                        .resources
+                        .into_iter()
+                        .map(|resource| resource.href)
+                        .collect::<Vec<_>>(),
+                )
+            },
+            None => None,
+        };
+
+        let request = match &matching_hrefs {
+            Some(hrefs) => libdav::caldav::GetCalendarResources::new(calendar_href)
+                .with_hrefs(hrefs.iter().map(String::as_str)),
+            None => libdav::caldav::GetCalendarResources::new(calendar_href),
+        };
+
         let response = self
             .inner
-            .request(libdav::caldav::GetCalendarResources::new(calendar_href))
+            .request(request)
             .await
             .map_err(|e| Error::Protocol(format!("failed to fetch calendar resources: {e}")))?;
 
@@ -293,3 +344,51 @@ impl CalDavClient for LibDavCalDavClient {
 
 /// Thread-safe shared CalDAV client.
 pub type SharedCalDavClient = Arc<dyn CalDavClient>;
+
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[cfg(test)]
+mod tests {
+    use {super::*, libdav::requests::DavRequest};
+
+    #[test]
+    fn time_range_query_nests_time_range_under_vcalendar_vevent() {
+        let query =
+            build_time_range_query("/cal/personal/", "20260101T000000Z", "20260201T000000Z")
+                .unwrap();
+        let prepared = query.prepare_request().unwrap();
+
+        assert_eq!(
+            prepared.method,
+            http::Method::from_bytes(b"REPORT").unwrap()
+        );
+        assert!(prepared.body.contains(concat!(
+            r#"<C:comp-filter name="VCALENDAR">"#,
+            r#"<C:comp-filter name="VEVENT">"#,
+            r#"<C:time-range start="20260101T000000Z" end="20260201T000000Z"/>"#,
+            r#"</C:comp-filter></C:comp-filter>"#,
+        )));
+    }
+
+    #[test]
+    fn time_range_query_uses_utc_z_timestamps_from_iso_input() {
+        // The full path from tool-level ISO 8601 strings to the REPORT body.
+        let start = crate::time_filter::to_ical_utc("2026-01-01T02:00:00+02:00").unwrap();
+        let end = crate::time_filter::to_ical_utc("2026-02-01").unwrap();
+        let query = build_time_range_query("/cal/personal/", &start, &end).unwrap();
+        let prepared = query.prepare_request().unwrap();
+
+        assert!(
+            prepared
+                .body
+                .contains(r#"<C:time-range start="20260101T000000Z" end="20260201T000000Z"/>"#)
+        );
+    }
+
+    #[test]
+    fn time_range_query_rejects_non_utc_timestamps() {
+        // libdav validates the YYYYMMDDTHHMMSSZ format; a raw ISO string
+        // must be rejected rather than silently sent to the server.
+        let result = build_time_range_query("/cal/personal/", "2026-01-01T00:00:00", "2026-02-01");
+        assert!(matches!(result, Err(Error::Validation(_))));
+    }
+}
