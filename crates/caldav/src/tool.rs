@@ -123,7 +123,8 @@ impl AgentTool for CalDavTool {
         "Manage calendar events via CalDAV. Supports multiple accounts (Fastmail, iCloud, generic).\n\n\
          Operations:\n\
          - list_calendars: List available calendars. Returns href, display_name, color, description.\n\
-         - list_events: List events in a calendar. Params: calendar (href, required), start/end (ISO 8601, optional).\n\
+         - list_events: List events in a calendar. Params: calendar (href, required), start/end (ISO 8601, optional). \
+           Provide BOTH start and end to filter server-side to that window; passing only one is ignored and returns every event.\n\
          - create_event: Create a new event. Params: calendar (href), summary, start (ISO 8601), end (optional), \
            all_day (bool), location, description.\n\
          - update_event: Update an existing event. Params: event_href, etag (required for concurrency), \
@@ -165,11 +166,11 @@ impl AgentTool for CalDavTool {
                 },
                 "start": {
                     "type": "string",
-                    "description": "Start date/time in ISO 8601 format (e.g. 2025-06-15T10:00:00 or 2025-06-15 for all-day)"
+                    "description": "Start date/time in ISO 8601 format (e.g. 2025-06-15T10:00:00 or 2025-06-15 for all-day). For list_events, filtering only applies when both start and end are set."
                 },
                 "end": {
                     "type": "string",
-                    "description": "End date/time in ISO 8601 format"
+                    "description": "End date/time in ISO 8601 format. For list_events, filtering only applies when both start and end are set."
                 },
                 "all_day": {
                     "type": "boolean",

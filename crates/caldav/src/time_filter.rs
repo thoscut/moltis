@@ -50,33 +50,21 @@ pub(crate) fn to_ical_utc(value: &str) -> Result<String> {
     ))
 }
 
-/// Resolve an event to a `[start, end]` interval in UTC.
+/// Whether an event overlaps the given range, following the `time-range`
+/// overlap semantics of RFC 4791 §9.9 — the same rules a compliant CalDAV
+/// server applies server-side — so this mirror stays faithful to it:
 ///
-/// Events without a DTEND are treated as instantaneous, except all-day
-/// events, which span one full day.
-#[cfg(test)]
-fn event_interval(event: &EventSummary) -> Option<(OffsetDateTime, OffsetDateTime)> {
-    let start = parse_iso_utc(event.start.as_deref()?)?;
-    let end = event
-        .end
-        .as_deref()
-        .and_then(parse_iso_utc)
-        .unwrap_or_else(|| {
-            if event.all_day {
-                start + Duration::days(1)
-            } else {
-                start
-            }
-        });
-    Some((start, end.max(start)))
-}
-
-/// Whether an event overlaps the given range (boundaries inclusive): an
-/// event is dropped only when it ends before `range.start` or starts after
-/// `range.end`.
+/// - Events with an explicit DTEND, and all-day events (treated as spanning
+///   one full day), overlap when `range.start < event_end` **and**
+///   `event_start < range.end`. Both bounds are strict, so an event that
+///   merely touches a boundary — ending exactly at `range.start` or starting
+///   exactly at `range.end` — does not match.
+/// - Instantaneous events (a DATE-TIME DTSTART with no DTEND) overlap when
+///   `range.start <= event_start < range.end`: inclusive at the lower bound,
+///   per the RFC's zero-duration rule.
 ///
-/// Events whose times are missing or unparseable are kept — silently hiding
-/// them would be worse than over-reporting.
+/// Events whose start is missing or unparseable, or a range that cannot be
+/// parsed, are kept — silently hiding them would be worse than over-reporting.
 #[cfg(test)]
 pub(crate) fn event_overlaps(event: &EventSummary, range: &TimeRange) -> bool {
     let (Some(range_start), Some(range_end)) =
@@ -84,9 +72,16 @@ pub(crate) fn event_overlaps(event: &EventSummary, range: &TimeRange) -> bool {
     else {
         return true;
     };
-    match event_interval(event) {
-        Some((start, end)) => end >= range_start && start <= range_end,
-        None => true,
+    let Some(start) = event.start.as_deref().and_then(parse_iso_utc) else {
+        return true;
+    };
+    match event.end.as_deref().and_then(parse_iso_utc) {
+        // Explicit DTEND: half-open [start, end), strict on both bounds.
+        Some(end) => range_start < end.max(start) && start < range_end,
+        // All-day without DTEND: spans one full day.
+        None if event.all_day => range_start < start + Duration::days(1) && start < range_end,
+        // Instantaneous DATE-TIME: lower bound inclusive, upper bound strict.
+        None => range_start <= start && start < range_end,
     }
 }
 
@@ -207,6 +202,47 @@ mod tests {
             Some("2026-02-28T01:00:00"),
             false,
         );
+        assert!(event_overlaps(
+            &ev,
+            &range("2026-02-01T00:00:00", "2026-02-28T00:00:00")
+        ));
+    }
+
+    #[test]
+    fn event_ending_exactly_at_range_start_is_excluded() {
+        // RFC 4791 §9.9 uses a strict `range.start < DTEND`, so an event that
+        // ends the instant the range begins does not overlap.
+        let ev = event(
+            Some("2026-01-31T23:00:00"),
+            Some("2026-02-01T00:00:00"),
+            false,
+        );
+        assert!(!event_overlaps(
+            &ev,
+            &range("2026-02-01T00:00:00", "2026-02-28T00:00:00")
+        ));
+    }
+
+    #[test]
+    fn event_starting_exactly_at_range_end_is_excluded() {
+        // Strict `DTSTART < range.end`: an event that starts the instant the
+        // range ends does not overlap.
+        let ev = event(
+            Some("2026-02-28T00:00:00"),
+            Some("2026-02-28T01:00:00"),
+            false,
+        );
+        assert!(!event_overlaps(
+            &ev,
+            &range("2026-02-01T00:00:00", "2026-02-28T00:00:00")
+        ));
+    }
+
+    #[test]
+    fn instantaneous_event_at_range_start_is_included() {
+        // Instantaneous events use the RFC's inclusive lower bound
+        // (`range.start <= DTSTART`), unlike events with an explicit DTEND.
+        let ev = event(Some("2026-02-01T00:00:00"), None, false);
         assert!(event_overlaps(
             &ev,
             &range("2026-02-01T00:00:00", "2026-02-28T00:00:00")
